@@ -1,24 +1,32 @@
 local QBCore = exports['qb-core']:GetCoreObject()
 local timeOut = false
 
-local cachedPoliceAmount = {}
+local cachedPoliceAmount = nil
 local flags = {}
 
 -- Callback
-
+local function resetCopCache()
+    CreateThread(function()
+        while true do
+            Wait(60 * 1000)
+            cachedPoliceAmount = 0
+        end
+    end)
+end
 QBCore.Functions.CreateCallback('qb-jewellery:server:getCops', function(source, cb)
     local amount = 0
+    if cachedPoliceAmount ~= nil then
+        cb(cachedPoliceAmount)
+        return
+    end
     for _, v in pairs(QBCore.Functions.GetQBPlayers()) do
         if (v.PlayerData.job.name == 'police' or v.PlayerData.job.type == 'leo') and v.PlayerData.job.onduty then
             amount = amount + 1
         end
     end
-    cachedPoliceAmount[source] = amount
+    cachedPoliceAmount = amount
+    resetCopCache()
     cb(amount)
-end)
-
-QBCore.Functions.CreateCallback('qb-jewellery:server:getVitrineState', function(_, cb)
-    cb(Config.Locations)
 end)
 
 -- Functions
@@ -39,6 +47,26 @@ local function exploitBan(id, reason)
     DropPlayer(id, 'You were permanently banned by the server for: Exploiting')
 end
 
+local function checkDistance(src, location, distance)
+    local pedCoords = GetEntityCoords(GetPlayerPed(src))
+    local dist = #(pedCoords - vector3(location.x, location.y, location.z))
+
+    if dist <= distance then
+        return true
+    end
+    local Player = QBCore.Functions.GetPlayer(src)
+    local Id = Player.PlayerData.citizenid
+    if flags[Id] then
+        flags[Id] = flags[Id] + 1
+        if flags[Id] >= 3 then
+            exploitBan(src, 'Failing 3 distance checks in qb-jewelery')
+        end
+    else
+        flags[Id] = 1
+    end
+    return false
+end
+
 local function getRewardBasedOnProbability(table)
     local random, probability = math.random(), 0
 
@@ -53,80 +81,62 @@ local function getRewardBasedOnProbability(table)
 end
 
 -- Events
-
-RegisterNetEvent('qb-jewellery:server:setVitrineState', function(stateType, state, k)
-    if stateType == 'isBusy' and type(state) == 'boolean' and Config.Locations[k] then
-        Config.Locations[k][stateType] = state
-        TriggerClientEvent('qb-jewellery:client:setVitrineState', -1, stateType, state, k)
+RegisterNetEvent('qb-jewellery:server:setBusy', function(k)
+    local src = source
+    if not Locations[k] then return end
+    if not checkDistance(src, Locations[k].coords, 5.0) then
+        return
     end
+    Locations[k].isBusy = not Locations[k].isBusy
+    GlobalState.QBJewelery = Locations
 end)
+
+local function setTakenStates(index)
+    Locations[index].isOpened = true
+    Locations[index].isBusy = false
+    GlobalState.QBJewelery = Locations
+    CreateThread(function()
+        Wait(Config.Timeout)
+        Locations[index].isOpened = false
+        GlobalState.QBJewelery = Locations
+    end)
+end
 
 RegisterNetEvent('qb-jewellery:server:vitrineReward', function(vitrineIndex)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    local cheating = false
-    if Config.Locations[vitrineIndex] == nil or Config.Locations[vitrineIndex].isOpened ~= false then
-        exploitBan(src, 'Trying to trigger an exploitable event \"qb-jewellery:server:vitrineReward\"')
+
+    if not Config.WhitelistedWeapons[GetCurrentPedWeapon(GetPlayerPed(src))] then
+        Locations[vitrineIndex].isBusy = false
+        GlobalState.QBJewelery = Locations
+        print('[WARNING] Exploit attempt blocked: qb-jewellery:server:vitrineReward - Invalid Weapon SOURCE: ' .. src)
         return
     end
-    if cachedPoliceAmount[source] == nil then
-        DropPlayer(src, 'Exploiting')
+
+    if Locations[vitrineIndex] == nil or Locations[vitrineIndex].isOpened ~= false then
+        print('[WARNING] Exploit attempt blocked: qb-jewellery:server:vitrineReward - Invalid Vitrine SOURCE: ' .. src)
         return
     end
-    local plrPed = GetPlayerPed(src)
-    local plrCoords = GetEntityCoords(plrPed)
-    local vitrineCoords = Config.Locations[vitrineIndex].coords
-    if cachedPoliceAmount[source] >= Config.RequiredCops then
-        if plrPed then
-            local dist = #(plrCoords - vitrineCoords)
-            if dist <= 25.0 then
-                Config.Locations[vitrineIndex]['isOpened'] = true
-                Config.Locations[vitrineIndex]['isBusy'] = false
-                TriggerClientEvent('qb-jewellery:client:setVitrineState', -1, 'isOpened', true, vitrineIndex)
-                TriggerClientEvent('qb-jewellery:client:setVitrineState', -1, 'isBusy', false, vitrineIndex)
-                local item = getRewardBasedOnProbability(Config.VitrineRewards)
-                local amount = math.random(Config.VitrineRewards[item]['amount']['min'], Config.VitrineRewards[item]['amount']['max'])
-                if exports['qb-inventory']:AddItem(src, Config.VitrineRewards[item]['item'], amount, false, false, 'qb-jewellery:server:vitrineReward') then
-                    TriggerClientEvent('qb-inventory:client:ItemBox', src, QBCore.Shared.Items[Config.VitrineRewards[item]['item']], 'add')
-                else
-                    TriggerClientEvent('QBCore:Notify', src, Lang:t('error.to_much'), 'error')
-                end
-            else
-                cheating = true
-            end
-        end
+
+    if cachedPoliceAmount < Config.RequiredCops then
+        Locations[vitrineIndex].isBusy = false
+        GlobalState.QBJewelery = Locations
+        print('[WARNING] Exploit attempt blocked: qb-jewellery:server:vitrineReward - Not enough cops SOURCE: ' .. src)
+        return
+    end
+
+    if not checkDistance(src, Locations[vitrineIndex].coords, 5.0) then
+        Locations[vitrineIndex].isBusy = false
+        GlobalState.QBJewelery = Locations
+        print('[WARNING] Exploit attempt blocked: qb-jewellery:server:vitrineReward - Invalid Distance SOURCE: ' .. src)
+        return
+    end
+    setTakenStates(vitrineIndex)
+    local item = getRewardBasedOnProbability(VitrineRewards)
+    local amount = math.random(VitrineRewards[item].amount.min, VitrineRewards[item].amount.max)
+    if exports['qb-inventory']:AddItem(src, VitrineRewards[item].item, amount, false, false, 'qb-jewellery:server:vitrineReward') then
+        TriggerClientEvent('qb-inventory:client:ItemBox', src, QBCore.Shared.Items[VitrineRewards[item].item], 'add', amount)
     else
-        cheating = true
-    end
-    if cheating then
-        local license = Player.PlayerData.license
-        if flags[license] then
-            flags[license] = flags[license] + 1
-        else
-            flags[license] = 1
-        end
-        if flags[license] >= 3 then
-            exploitBan('Getting flagged many times from exploiting the \"qb-jewellery:server:vitrineReward\" event')
-        else
-            DropPlayer(src, 'Exploiting')
-        end
+        TriggerClientEvent('QBCore:Notify', src, Lang:t('error.to_much'), 'error')
     end
 end)
 
-RegisterNetEvent('qb-jewellery:server:setTimeout', function()
-    if not timeOut then
-        timeOut = true
-        TriggerEvent('qb-scoreboard:server:SetActivityBusy', 'jewellery', true)
-        Citizen.CreateThread(function()
-            Citizen.Wait(Config.Timeout)
-
-            for k, _ in pairs(Config.Locations) do
-                Config.Locations[k]['isOpened'] = false
-                TriggerClientEvent('qb-jewellery:client:setVitrineState', -1, 'isOpened', false, k)
-                TriggerClientEvent('qb-jewellery:client:setAlertState', -1, false)
-                TriggerEvent('qb-scoreboard:server:SetActivityBusy', 'jewellery', false)
-            end
-            timeOut = false
-        end)
-    end
-end)
